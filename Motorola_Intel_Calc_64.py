@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 import tkinter as tk
+from ctypes import Structure, byref, c_long, c_ulong, c_void_p, windll
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -37,12 +38,15 @@ class MotorolaIntelCalc64(tk.Tk):
         self.value = tk.StringVar()
         self.bit_labels: dict[int, int] = {}
         self.byte_labels: list[tk.Label] = []
+        self._header_width = 0
+        self._table_width = 0
+        self._table_redraw_job: str | None = None
 
         self._make_ui()
         self._draw_values()
-        self._center_window()
         self.deiconify()
         self._toggle_topmost()
+        self._center_window()
 
     def _set_window_icon(self) -> None:
         """Use the bundled application icon in both source and frozen builds."""
@@ -53,12 +57,30 @@ class MotorolaIntelCalc64(tk.Tk):
             pass
 
     def _center_window(self) -> None:
-        """Place the initial window in the centre of the active screen."""
+        """Place the mapped window in the centre of Tk's primary display."""
         self.update_idletasks()
-        width, height = self.winfo_width(), self.winfo_height()
-        x = max(0, (self.winfo_screenwidth() - width) // 2)
-        y = max(0, (self.winfo_screenheight() - height) // 2)
-        self.geometry(f"{width}x{height}+{x}+{y}")
+        client_width, client_height = self.winfo_width(), self.winfo_height()
+        outer_width, outer_height = client_width, client_height
+        screen_width, screen_height = self.winfo_screenwidth(), self.winfo_screenheight()
+        if sys.platform == "win32":
+            class Rect(Structure):
+                _fields_ = [("left", c_long), ("top", c_long), ("right", c_long), ("bottom", c_long)]
+
+            user32 = windll.user32
+            user32.GetAncestor.argtypes = [c_void_p, c_ulong]
+            user32.GetAncestor.restype = c_void_p
+            user32.GetWindowRect.argtypes = [c_void_p, c_void_p]
+            user32.GetWindowRect.restype = c_long
+            # winfo_id() identifies Tk's client window.  Use its root ancestor
+            # so measurements include the title bar and resize border.
+            window = user32.GetAncestor(c_void_p(self.winfo_id()), 2) or c_void_p(self.winfo_id())
+            window_rect = Rect()
+            if user32.GetWindowRect(window, byref(window_rect)):
+                outer_width = window_rect.right - window_rect.left
+                outer_height = window_rect.bottom - window_rect.top
+        x = max(0, (screen_width - outer_width) // 2)
+        y = max(0, (screen_height - outer_height) // 2)
+        self.geometry(f"{client_width}x{client_height}+{x}+{y}")
 
     def _make_ui(self) -> None:
         outer = ttk.Frame(self, padding=(5, 5, 5, 4))
@@ -79,9 +101,9 @@ class MotorolaIntelCalc64(tk.Tk):
         self.canvas.configure(yscrollcommand=ybar.set)
         self.canvas.grid(row=1, column=0, sticky="nsew")
         ybar.grid(row=1, column=1, sticky="ns")
-        self.header_canvas.bind("<Configure>", self._draw_header)
-        self.canvas.bind("<Configure>", self._draw_table)
-        self.canvas.bind_all("<MouseWheel>", self._mousewheel)
+        self.header_canvas.bind("<Configure>", self._header_resized)
+        self.canvas.bind("<Configure>", self._table_resized)
+        self.canvas.bind("<MouseWheel>", self._mousewheel)
 
         controls = tk.Frame(outer, bg="#f3f3f3", relief="groove", borderwidth=1, padx=10, pady=12)
         controls.grid(row=1, column=0, sticky="ew", pady=(5, 0))
@@ -114,9 +136,16 @@ class MotorolaIntelCalc64(tk.Tk):
         entry.bind("<Return>", self.apply_field)
         entry.bind("<FocusOut>", self.apply_field)
 
-    def _draw_header(self, event: tk.Event | None = None) -> None:
+    def _header_resized(self, event: tk.Event) -> None:
+        """Redraw the header only when its width changes."""
+        if event.width == self._header_width:
+            return
+        self._header_width = event.width
+        self._draw_header(event.width)
+
+    def _draw_header(self, width: int | None = None) -> None:
         """Draw the fixed table header; it does not participate in scrolling."""
-        width = self.header_canvas.winfo_width() if event is None else event.width
+        width = self.header_canvas.winfo_width() if width is None else width
         if width <= 1:
             return
         table_width = width - 2
@@ -134,12 +163,23 @@ class MotorolaIntelCalc64(tk.Tk):
             self.header_canvas.create_line(x, 0, x, row_height, fill="black", width=1)
         self.header_canvas.create_line(0, row_height - 1, table_width, row_height - 1, fill="black", width=1)
 
-    def _draw_table(self, event: tk.Event | None = None) -> None:
+    def _table_resized(self, event: tk.Event) -> None:
+        """Coalesce horizontal resize events before rebuilding the 64-row grid."""
+        if event.width <= 1 or event.width == self._table_width:
+            return
+        self._table_width = event.width
+        if self._table_redraw_job is not None:
+            self.after_cancel(self._table_redraw_job)
+        self._table_redraw_job = self.after(60, self._draw_table)
+
+    def _draw_table(self) -> None:
         """Draw the grid as canvas items, rather than hundreds of widgets.
 
-        This keeps wheel scrolling and resizing responsive even for 64 CAN FD bytes.
+        Resizing rebuilds the grid only after the user pauses briefly, avoiding
+        hundreds of Canvas and Label operations for every drag event.
         """
-        width = self.canvas.winfo_width() if event is None else event.width
+        self._table_redraw_job = None
+        width = self.canvas.winfo_width()
         if width <= 1:  # Canvas has not been laid out yet.
             return
         table_width = width - 2  # Keep the final black outline inside the viewport.
@@ -201,7 +241,11 @@ class MotorolaIntelCalc64(tk.Tk):
 
     @staticmethod
     def _parse(text: str) -> int:
-        return int(text.strip(), 0)
+        """Parse decimal (including leading zeroes) or a 0x hexadecimal value."""
+        value = text.strip()
+        if value.lower().lstrip("+-").startswith("0x"):
+            return int(value, 16)
+        return int(value, 10)
 
     def apply_field(self, _event: tk.Event | None = None) -> None:
         if not all((self.lsb.get().strip(), self.size.get().strip(), self.value.get().strip())):

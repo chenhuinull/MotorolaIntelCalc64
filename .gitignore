@@ -1,0 +1,14 @@
+# Python bytecode and tools
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller outputs
+build/
+*.spec
+
+# Test and editor files
+.pytest_cache/
+.mypy_cache/
+.vscode/
+.idea/
