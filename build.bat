@@ -2,13 +2,19 @@
 setlocal
 
 cd /d "%~dp0"
-set "PYTHON=python"
-set "ICON=%~dp0Motorola_Intel_Calc_64.ico"
-set "SOURCE=%~dp0Motorola_Intel_Calc_64.py"
+set "PYTHON=%~dp0Toolchain\python\python.exe"
+set "ICON=%~dp0MotorolaIntelCalc64.ico"
+set "SOURCE=%~dp0MotorolaIntelCalc64.py"
 
-where python >nul 2>&1
+if not exist "%PYTHON%" (
+    echo [ERROR] Local Python was not found: %PYTHON%
+    exit /b 1
+)
+
+"%PYTHON%" -c "import PyInstaller" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] System Python was not found in PATH.
+    echo [ERROR] PyInstaller is missing from Toolchain\python.
+    echo Install it: "%PYTHON%" -m pip install pyinstaller
     exit /b 1
 )
 
@@ -24,10 +30,10 @@ if not exist "%SOURCE%" (
 
 "%PYTHON%" -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
-    --name Motorola_Intel_Calc_64 ^
+    --name MotorolaIntelCalc64 ^
     --icon "%ICON%" ^
     --add-data "%ICON%;." ^
-    --distpath "%~dp0release" ^
+    --distpath "%~dp0Out" ^
     --workpath "%~dp0build\pyinstaller_final" ^
     --specpath "%~dp0build" ^
     "%SOURCE%"
@@ -39,5 +45,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo [OK] Built: %~dp0release\Motorola_Intel_Calc_64.exe
+echo [OK] Built: %~dp0Out\MotorolaIntelCalc64.exe
 endlocal

@@ -1,6 +1,6 @@
-"""Motorola_Intel_Calc_64 — CAN FD bit-field calculator (64 bytes / 512 bits).
+"""MotorolaIntelCalc64 — CAN FD bit-field calculator (64 bytes / 512 bits).
 
-Run with:  python Motorola_Intel_Calc_64.py
+Run with:  python MotorolaIntelCalc64.py
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from tkinter import messagebox, ttk
 
 BYTE_COUNT = 64
 BIT_COUNT = BYTE_COUNT * 8
-APP_NAME = "Motorola_Intel_Calc_64"
-APP_ICON = "Motorola_Intel_Calc_64.ico"
+APP_NAME = "MotorolaIntelCalc64"
+APP_ICON = "MotorolaIntelCalc64.ico"
 ACTIVE = "#e85d2a"
 HEADER = "#4daac1"
 ALT_ROW = "#f0f2df"
@@ -123,7 +123,7 @@ class MotorolaIntelCalc64(tk.Tk):
         ttk.Checkbutton(controls, text="Top", variable=self.always_on_top,
                         command=self._toggle_topmost).grid(row=0, column=9, sticky="w")
 
-        self.status = ttk.Label(outer, text="范围：0–511 bit；数值可输入十进制或 0x 十六进制。")
+        self.status = ttk.Label(outer, text="Range: 0-511 bit; value accepts decimal or 0x hexadecimal.")
         self.status.grid(row=2, column=0, sticky="w", pady=(4, 0))
 
     def _entry(self, parent: ttk.LabelFrame, label: str | ttk.Label, variable: tk.StringVar,
@@ -256,7 +256,7 @@ class MotorolaIntelCalc64(tk.Tk):
             if value < 0 or value >= (1 << size):
                 raise ValueError("Value does not fit in Size")
         except ValueError as exc:
-            self.status.configure(text=f"输入无效：{exc}")
+            self.status.configure(text=f"Invalid input: {exc}")
             return
         self.bytes = [0] * BYTE_COUNT
         # MSB formats take their start bit from the most-significant bit of Value.
@@ -264,13 +264,13 @@ class MotorolaIntelCalc64(tk.Tk):
         for value_bit, target_bit in zip(value_bits, positions):
             if value & (1 << value_bit):
                 self.bytes[target_bit // 8] |= 1 << (target_bit % 8)
-        self.status.configure(text=f"已写入 {size} bit（{self.mode.get()}）。")
+        self.status.configure(text=f"Wrote {size} bit ({self.mode.get()}).")
         self._draw_values()
         self._ensure_result_visible(lsb, positions)
 
     def _positions(self, lsb: int, size: int) -> list[int]:
         if not 0 <= lsb < BIT_COUNT or not 1 <= size <= BIT_COUNT:
-            raise ValueError("Lsb 必须为 0–511，Size 必须为 1–512")
+            raise ValueError("StartBit must be in 0-511, Size must be in 1-512")
         mode = self.mode.get()
         if mode == "Intel LSB":
             positions = list(range(lsb, lsb + size))
@@ -297,7 +297,7 @@ class MotorolaIntelCalc64(tk.Tk):
                     bit = 7
                     byte += 1
         if any(bit < 0 or bit >= BIT_COUNT for bit in positions):
-            raise ValueError("该字段越过 CAN FD 的 64 Byte 边界")
+            raise ValueError("Field crosses the 64-byte CAN FD boundary")
         return positions
 
     def _draw_values(self) -> None:
@@ -337,12 +337,12 @@ class MotorolaIntelCalc64(tk.Tk):
         byte, bit_in_byte = divmod(bit, 8)
         self.bytes[byte] ^= 1 << bit_in_byte
         self._draw_values()
-        self.status.configure(text=f"已切换 bit {bit}。")
+        self.status.configure(text=f"Toggled bit {bit}.")
 
     def copy_byte(self, byte: int) -> None:
         self.clipboard_clear()
         self.clipboard_append(f"0x{self.bytes[byte]:02X}")
-        self.status.configure(text=f"Byte {byte} 已复制到剪贴板。")
+        self.status.configure(text=f"Byte {byte} copied to clipboard.")
 
     def _mode_changed(self, _event: tk.Event | None = None) -> None:
         self.title(f"{APP_NAME} - {self.mode.get()}")
@@ -354,11 +354,11 @@ class MotorolaIntelCalc64(tk.Tk):
     def clear(self) -> None:
         self.bytes = [0] * BYTE_COUNT
         self._draw_values()
-        self.status.configure(text="已清除。")
+        self.status.configure(text="Cleared.")
 
     @staticmethod
     def help() -> None:
-        messagebox.showinfo("Help", "单击 Bit 位可切换该位。\n双击 Byte 值可复制。\n支持 64 Byte CAN FD（bit 0–511）。")
+        messagebox.showinfo("Help", "Click a bit cell to toggle it.\nDouble-click a byte value to copy it.\nSupports 64-byte CAN FD (bit 0-511).")
 
 
 if __name__ == "__main__":
