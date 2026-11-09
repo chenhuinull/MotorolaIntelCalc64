@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 import tkinter as tk
-from ctypes import Structure, byref, c_long, c_ulong, c_void_p, windll
+from ctypes import POINTER, Structure, byref, c_long, c_ulong, c_void_p, windll, wintypes
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -19,6 +19,9 @@ APP_ICON = "MotorolaIntelCalc64.ico"
 ACTIVE = "#e85d2a"
 HEADER = "#4daac1"
 ALT_ROW = "#f0f2df"
+RESIZE_CORNER = 16
+WM_NCLBUTTONDOWN = 0x00A1
+HTBOTTOMRIGHT = 17
 
 
 class MotorolaIntelCalc64(tk.Tk):
@@ -40,7 +43,10 @@ class MotorolaIntelCalc64(tk.Tk):
         self.byte_labels: list[tk.Label] = []
         self._header_width = 0
         self._table_width = 0
+        self._grid_width = 0
         self._table_redraw_job: str | None = None
+        self._value_windows: list[int] = []
+        self._cursor_sync_job: str | None = None
 
         self._make_ui()
         self._draw_values()
@@ -126,6 +132,60 @@ class MotorolaIntelCalc64(tk.Tk):
         self.status = ttk.Label(outer, text="Range: 0-511 bit; value accepts decimal or 0x hexadecimal.")
         self.status.grid(row=2, column=0, sticky="w", pady=(4, 0))
 
+        # Windows only shows the resize arrow over its non-client border, which
+        # lies in the invisible margin outside this window's visible frame.
+        # This colour-matched corner patch extends the hotspot into the client
+        # area and starts the same native resize as the window border.
+        corner_background = ttk.Style(self).lookup("TFrame", "background") or self.cget("background")
+        self.resize_corner = tk.Frame(self, width=RESIZE_CORNER, height=RESIZE_CORNER,
+                                      background=corner_background, borderwidth=0,
+                                      highlightthickness=0, cursor="size_nw_se")
+        self.resize_corner.place(relx=1.0, rely=1.0, anchor="se",
+                                 width=RESIZE_CORNER, height=RESIZE_CORNER)
+        self.resize_corner.bind("<Button-1>", self._begin_corner_resize)
+        self.bind("<Configure>", self._window_configured, add="+")
+
+    def _window_configured(self, event: tk.Event) -> None:
+        """Keep the corner cursor in step with maximize and restore."""
+        if event.widget is not self:
+            return
+        if self._cursor_sync_job is None:
+            self._cursor_sync_job = self.after_idle(self._sync_resize_cursor)
+
+    def _sync_resize_cursor(self) -> None:
+        self._cursor_sync_job = None
+        cursor = "arrow" if self.state() == "zoomed" else "size_nw_se"
+        if self.resize_corner.cget("cursor") != cursor:
+            self.resize_corner.configure(cursor=cursor)
+
+    def _begin_corner_resize(self, _event: tk.Event | None = None) -> str:
+        """Hand a bottom-right press over to the native non-client resize loop.
+
+        The message is posted, not sent: a synchronous WM_NCLBUTTONDOWN starts
+        a nested modal loop inside a ctypes call that has released the GIL,
+        where Tk callbacks would then run without a valid thread state.
+        """
+        if sys.platform != "win32" or self.state() == "zoomed":
+            return "break"
+        user32 = windll.user32
+        user32.GetCursorPos.argtypes = [POINTER(wintypes.POINT)]
+        user32.GetCursorPos.restype = wintypes.BOOL
+        user32.PostMessageW.argtypes = [c_void_p, c_ulong, wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostMessageW.restype = wintypes.BOOL
+        user32.ReleaseCapture.argtypes = []
+        user32.ReleaseCapture.restype = wintypes.BOOL
+        point = wintypes.POINT()
+        if not user32.GetCursorPos(byref(point)):
+            return "break"
+        try:
+            window = int(self.wm_frame(), 16)
+        except (tk.TclError, ValueError):
+            return "break"
+        user32.ReleaseCapture()
+        user32.PostMessageW(window, WM_NCLBUTTONDOWN, HTBOTTOMRIGHT,
+                            (point.y << 16) | (point.x & 0xFFFF))
+        return "break"
+
     def _entry(self, parent: ttk.LabelFrame, label: str | ttk.Label, variable: tk.StringVar,
                column: int, width: int = 9) -> None:
         if isinstance(label, str):
@@ -164,19 +224,36 @@ class MotorolaIntelCalc64(tk.Tk):
         self.header_canvas.create_line(0, row_height - 1, table_width, row_height - 1, fill="black", width=1)
 
     def _table_resized(self, event: tk.Event) -> None:
-        """Coalesce horizontal resize events before rebuilding the 64-row grid."""
+        """Stretch the drawn grid while resizing, then rebuild it when settled.
+
+        Rebuilding the 64-row grid takes over 100 ms, which would freeze the
+        drag and leave the canvas blank.  Scaling the existing items is cheap
+        and keeps their content visible; the deferred rebuild removes the
+        accumulated rounding afterwards.
+        """
         if event.width <= 1 or event.width == self._table_width:
             return
         self._table_width = event.width
+        table_width = event.width - 2
+        if self._grid_width > 1 and table_width > 1:
+            ratio = table_width / self._grid_width
+            if abs(ratio - 1.0) > 1e-4:
+                self.canvas.scale("grid", 0, 0, ratio, 1.0)
+                cell_width = table_width / 10
+                for item in self._value_windows:
+                    self.canvas.itemconfigure(item, width=max(cell_width - 3, 1))
+                self.canvas.configure(scrollregion=(0, 0, table_width, BYTE_COUNT * 28))
+                self._grid_width = table_width
         if self._table_redraw_job is not None:
             self.after_cancel(self._table_redraw_job)
-        self._table_redraw_job = self.after(60, self._draw_table)
+        delay = 0 if self._grid_width <= 1 else 120
+        self._table_redraw_job = self.after(delay, self._draw_table)
 
     def _draw_table(self) -> None:
         """Draw the grid as canvas items, rather than hundreds of widgets.
 
-        Resizing rebuilds the grid only after the user pauses briefly, avoiding
-        hundreds of Canvas and Label operations for every drag event.
+        The full rebuild is deferred until a resize settles; during the drag
+        `_table_resized` stretches the existing items instead.
         """
         self._table_redraw_job = None
         width = self.canvas.winfo_width()
@@ -190,6 +267,7 @@ class MotorolaIntelCalc64(tk.Tk):
         self.canvas.delete("grid")
         self.bit_labels.clear()
         self.byte_labels.clear()
+        self._value_windows.clear()
         for byte_index in range(BYTE_COUNT):
             y0, y1 = byte_index * row_height, (byte_index + 1) * row_height
             byte_background = ALT_ROW if byte_index % 2 else "white"
@@ -211,6 +289,7 @@ class MotorolaIntelCalc64(tk.Tk):
             y = row * row_height
             self.canvas.create_line(0.5, y, table_width - 0.5, y, fill="black", width=1, tags="grid")
         self.canvas.configure(scrollregion=(0, 0, table_width, table_height))
+        self._grid_width = table_width
         self._draw_values()
 
     def _canvas_cell(self, column: int, y0: float, y1: float, text: str, background: str,
@@ -231,8 +310,9 @@ class MotorolaIntelCalc64(tk.Tk):
         x0, x1 = 9 * width / 10, width
         label = tk.Label(self.canvas, text="0x00", font=("宋体", 15, "bold italic"),
                          bg="white", fg="black", borderwidth=0, highlightthickness=0)
-        self.canvas.create_window((x0 + x1) / 2, (y0 + y1) / 2, window=label,
-                                  width=x1 - x0 - 3, height=y1 - y0 - 3, tags="grid")
+        item = self.canvas.create_window((x0 + x1) / 2, (y0 + y1) / 2, window=label,
+                                         width=x1 - x0 - 3, height=y1 - y0 - 3, tags="grid")
+        self._value_windows.append(item)
         label.bind("<Double-Button-1>", lambda _event, b=byte_index: self.copy_byte(b))
         return label
 
